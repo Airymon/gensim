@@ -532,6 +532,7 @@ def train_batch_sg(model, sentences, alpha, _work, compute_loss):
 
     # prepare C structures so we can go "full C" and release the Python GIL
     vlookup = model.wv.vocab
+    vfixedvecs = model.fixed_vectors
     c.sentence_idx[0] = 0  # indices of the first sentence always start at 0
     for sent in sentences:
         if not sent:
@@ -540,6 +541,8 @@ def train_batch_sg(model, sentences, alpha, _work, compute_loss):
             word = vlookup[token] if token in vlookup else None
             if word is None:
                 continue  # leaving `effective_words` unchanged = shortening the sentence = expanding the window
+            if token in vfixedvecs:
+                continue
             if c.sample and word.sample_int < random_int32(&c.next_random):
                 continue
             c.indexes[effective_words] = word.index
@@ -587,7 +590,9 @@ def train_batch_sg(model, sentences, alpha, _work, compute_loss):
     model.running_training_loss = c.running_training_loss
     return effective_words
 
-
+# This will get called for each update during training and needs to fix vectors
+# We can store the vectors to be skipped in the Word2Vec model itself accessible here
+# The other function doing sg updates is train_batch_sg
 def train_batch_cbow(model, sentences, alpha, _work, _neu1, compute_loss):
     """Update CBOW model by training on a batch of sentences.
 
@@ -623,6 +628,7 @@ def train_batch_cbow(model, sentences, alpha, _work, _neu1, compute_loss):
 
     # prepare C structures so we can go "full C" and release the Python GIL
     vlookup = model.wv.vocab
+    vfixedvecs = model.fixed_vectors
     c.sentence_idx[0] = 0  # indices of the first sentence always start at 0
     for sent in sentences:
         if not sent:
@@ -631,6 +637,12 @@ def train_batch_cbow(model, sentences, alpha, _work, _neu1, compute_loss):
             word = vlookup[token] if token in vlookup else None
             if word is None:
                 continue  # leaving `effective_words` unchanged = shortening the sentence = expanding the window
+            ### WE CAN INTERCEPT OUR VOCAB HERE WHEN IT COMES UP AND SKIP ADDING IT TO THE INDEX
+            ### FOR THIS WE COMPARE IT TO OUR PREPARED DICT AND CONTINUE IF WE HIT
+            ### e.g. if word in ourstructure: continue
+            ### dont forget adding the same to the other training routines
+            if token in vfixedvecs:
+                continue
             if c.sample and word.sample_int < random_int32(&c.next_random):
                 continue
             c.indexes[effective_words] = word.index

@@ -53,7 +53,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
+### BASE CLASS FOR ALL WORD EMBEDDINGS THIS HANDLES TRAINING AND NEEDS TO FIX VECTORS
 class BaseAny2VecModel(utils.SaveLoad):
     r"""Base class for training, using and evaluating \*2vec model.
 
@@ -176,6 +176,8 @@ class BaseAny2VecModel(utils.SaveLoad):
         progress_queue.put((examples, tally, raw_tally))
         progress_queue.put(None)
 
+    ### WORKERS HANDLE THE UPDATING _do_train_job() IS THE EXECUTING FUNCTION
+    ### NOTE THAT THE TRAIN JOB IS HANDLED BY THE SUBCLASS Word2Vec
     def _worker_loop(self, job_queue, progress_queue):
         """Train the model, lifting batches of data from the queue.
 
@@ -433,6 +435,7 @@ class BaseAny2VecModel(utils.SaveLoad):
 
         return trained_word_count, raw_word_count, job_tally
 
+    ### SETS UP WORKERS JUST LIKE ABOVE
     def _train_epoch(self, data_iterable, cur_epoch=0, total_examples=None, total_words=None,
                      queue_factor=2, report_delay=1.0):
         """Train the model for a single epoch.
@@ -489,6 +492,7 @@ class BaseAny2VecModel(utils.SaveLoad):
 
         return trained_word_count, raw_word_count, job_tally
 
+    ### ENTRY POINT FOR ALL TRAINING PASSES ON TO _train_epoch() AND _train_epoch_corpusfile()
     def train(self, data_iterable=None, corpus_file=None, epochs=None, total_examples=None,
               total_words=None, queue_factor=2, report_delay=1.0, callbacks=(), **kwargs):
         """Train the model for multiple epochs using multiple workers.
@@ -619,7 +623,7 @@ class BaseAny2VecModel(utils.SaveLoad):
         """
         super(BaseAny2VecModel, self).save(fname_or_handle, **kwargs)
 
-
+### SUPERCLASS TO Word2Vec NEEDS TO HANDLE THE INITIALIZATION OF VECTORS
 class BaseWordEmbeddingsModel(BaseAny2VecModel):
     """Base class containing common methods for training, using & evaluating word embeddings learning models.
 
@@ -742,6 +746,7 @@ class BaseWordEmbeddingsModel(BaseAny2VecModel):
             elif isinstance(sentences, GeneratorType):
                 raise TypeError("You can't pass a generator as the sentences argument. Try a sequence.")
 
+            ### build_vocab INITIALIZES THE WEIGHTS
             self.build_vocab(sentences=sentences, corpus_file=corpus_file, trim_rule=trim_rule)
             self.train(
                 sentences=sentences, corpus_file=corpus_file, total_examples=self.corpus_count,
@@ -879,8 +884,9 @@ class BaseWordEmbeddingsModel(BaseAny2VecModel):
             self.__class__.__name__, len(self.wv.index2word), self.vector_size, self.alpha
         )
 
+    ### SIGNATURE GETS UPDATED FOR HANDLING FIXED VECTORS
     def build_vocab(self, sentences=None, corpus_file=None, update=False, progress_per=10000,
-                    keep_raw_vocab=False, trim_rule=None, **kwargs):
+                    keep_raw_vocab=False, trim_rule=None, fixed_vectors=None, **kwargs):
         """Build vocabulary from a sequence of sentences (can be a once-only generator stream).
 
         Parameters
@@ -926,7 +932,11 @@ class BaseWordEmbeddingsModel(BaseAny2VecModel):
             self.hs, self.negative, self.wv, update=update, keep_raw_vocab=keep_raw_vocab,
             trim_rule=trim_rule, **kwargs)
         report_values['memory'] = self.estimate_memory(vocab_size=report_values['num_retained_words'])
-        self.trainables.prepare_weights(self.hs, self.negative, self.wv, update=update, vocabulary=self.vocabulary)
+        ### TRAINABLES NEEDS TO PASS THE FIXED VOCAB AND VECTORS AS A DICT SEE Word2VecTrainables
+        if fixed_vectors is None:
+            self.trainables.prepare_weights(self.hs, self.negative, self.wv, self.fixed_vectors, update=update, vocabulary=self.vocabulary)
+        else:
+            self.trainables.prepare_weights(self.hs, self.negative, self.wv, fixed_vectors, update=update, vocabulary=self.vocabulary)
 
     def build_vocab_from_freq(self, word_freq, keep_raw_vocab=False, corpus_count=None, trim_rule=None, update=False):
         """Build vocabulary from a dictionary of word frequencies.
@@ -976,7 +986,7 @@ class BaseWordEmbeddingsModel(BaseAny2VecModel):
             trim_rule=trim_rule, update=update)
         report_values['memory'] = self.estimate_memory(vocab_size=report_values['num_retained_words'])
         self.trainables.prepare_weights(
-            self.hs, self.negative, self.wv, update=update, vocabulary=self.vocabulary)  # build tables & arrays
+            self.hs, self.negative, self.wv, self.fixed_vectors, update=update, vocabulary=self.vocabulary)  # build tables & arrays
 
     def estimate_memory(self, vocab_size=None, report=None):
         """Estimate required memory for a model using current settings and provided vocabulary size.
@@ -1009,6 +1019,7 @@ class BaseWordEmbeddingsModel(BaseAny2VecModel):
         )
         return report
 
+    ### NEEDS TO KEEP TRACK OF FIXED VECTORS SEE BaseAny2VecModel
     def train(self, sentences=None, corpus_file=None, total_examples=None, total_words=None,
               epochs=None, start_alpha=None, end_alpha=None, word_count=0,
               queue_factor=2, report_delay=1.0, compute_loss=False, callbacks=(), **kwargs):

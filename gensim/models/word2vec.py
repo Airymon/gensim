@@ -439,7 +439,11 @@ def score_cbow_pair(model, word, l1):
     lprob = -logaddexp(0, -sgn * dot(l1, l2a.T))
     return sum(lprob)
 
-
+### DO TRAIN JOB HANDLES ACTUAL TRAINING NOT THE SUPERCLASSES THEY JUST SCHEDULE JOBS
+### UPDATES ARE DONE IN word2vec_inner for CYTHON IMPLEMENTATION
+### CALLS train_batch_sg() AND train_batch_cbow()
+### train_epoch_x() IS ONLY USED WHEN USING CORPUSFILES
+### WE NEED TO ADD OUR FIXED VECTORS IN THE CALL SO WE CAN ACCESS THEM LATER
 class Word2Vec(BaseWordEmbeddingsModel):
     """Train, use and evaluate neural networks described in https://code.google.com/p/word2vec/.
 
@@ -473,12 +477,12 @@ class Word2Vec(BaseWordEmbeddingsModel):
         (which means that the size of the hidden layer is equal to the number of features `self.size`).
 
     """
-
+    ### ADD EXTRA PARAM FOR OUR FIXED VECTORS HERE, MAKE IT A DICT
     def __init__(self, sentences=None, corpus_file=None, size=100, alpha=0.025, window=5, min_count=5,
                  max_vocab_size=None, sample=1e-3, seed=1, workers=3, min_alpha=0.0001,
                  sg=0, hs=0, negative=5, ns_exponent=0.75, cbow_mean=1, hashfxn=hash, iter=5, null_word=0,
                  trim_rule=None, sorted_vocab=1, batch_words=MAX_WORDS_IN_BATCH, compute_loss=False, callbacks=(),
-                 max_final_vocab=None):
+                 max_final_vocab=None, fixed_vectors=None):
         """
 
         Parameters
@@ -571,6 +575,8 @@ class Word2Vec(BaseWordEmbeddingsModel):
             :meth:`~gensim.models.word2vec.Word2Vec.get_latest_training_loss`.
         callbacks : iterable of :class:`~gensim.models.callbacks.CallbackAny2Vec`, optional
             Sequence of callbacks to be executed at specific stages during training.
+        fixed_vectors : dictionary of words mapped to word vectors that will be set
+            at initialization and don't change during training
 
         Examples
         --------
@@ -593,6 +599,7 @@ class Word2Vec(BaseWordEmbeddingsModel):
             max_vocab_size=max_vocab_size, min_count=min_count, sample=sample, sorted_vocab=bool(sorted_vocab),
             null_word=null_word, max_final_vocab=max_final_vocab, ns_exponent=ns_exponent)
         self.trainables = Word2VecTrainables(seed=seed, vector_size=size, hashfxn=hashfxn)
+        self.fixed_vectors = fixed_vectors if fixed_vectors else dict()
 
         super(Word2Vec, self).__init__(
             sentences=sentences, corpus_file=corpus_file, workers=workers, vector_size=size, epochs=iter,
@@ -612,6 +619,7 @@ class Word2Vec(BaseWordEmbeddingsModel):
 
         return examples, tally, raw_tally
 
+    ### GOES TO train_batch_sg() or train_batch_cbow() FOR TRAINING
     def _do_train_job(self, sentences, alpha, inits):
         """Train the model on a single batch of sentences.
 
@@ -1672,7 +1680,7 @@ def _assign_binary_codes(vocab):
 
     logger.info("built huffman tree with maximum node depth %i", max_depth)
 
-
+### INITIALIZES ALL VECTORS USED BY BaseWordEmbeddingsModel
 class Word2VecTrainables(utils.SaveLoad):
     """Represents the inner shallow neural network used to train :class:`~gensim.models.word2vec.Word2Vec`."""
     def __init__(self, vector_size=100, seed=1, hashfxn=hash):
@@ -1680,13 +1688,13 @@ class Word2VecTrainables(utils.SaveLoad):
         self.layer1_size = vector_size
         self.seed = seed
 
-    def prepare_weights(self, hs, negative, wv, update=False, vocabulary=None):
+    def prepare_weights(self, hs, negative, wv, fixed_vectors, update=False, vocabulary=None):
         """Build tables and model weights based on final vocabulary settings."""
         # set initial input/projection and hidden weights
         if not update:
-            self.reset_weights(hs, negative, wv)
+            self.reset_weights(hs, negative, wv, fixed_vectors)
         else:
-            self.update_weights(hs, negative, wv)
+            self.update_weights(hs, negative, wv, fixed_vectors)
 
     def seeded_vector(self, seed_string, vector_size):
         """Get a random vector (but deterministic by seed_string)."""
@@ -1694,14 +1702,19 @@ class Word2VecTrainables(utils.SaveLoad):
         once = random.RandomState(self.hashfxn(seed_string) & 0xffffffff)
         return (once.rand(vector_size) - 0.5) / vector_size
 
-    def reset_weights(self, hs, negative, wv):
+    def reset_weights(self, hs, negative, wv, fixed_vectors):
         """Reset all projection weights to an initial (untrained) state, but keep the existing vocabulary."""
         logger.info("resetting layer weights")
         wv.vectors = empty((len(wv.vocab), wv.vector_size), dtype=REAL)
         # randomize weights vector by vector, rather than materializing a huge random matrix in RAM at once
         for i in range(len(wv.vocab)):
+            ### INTERCEPT OUR FIXED VECTORS HERE AND PUT THEM IN
+            current_word = wv.index2word[i]
+            if current_word in fixed_vectors:
+                wv.vectors[i] = fixed_vectors[current_word]
             # construct deterministic seed from word AND seed argument
-            wv.vectors[i] = self.seeded_vector(wv.index2word[i] + str(self.seed), wv.vector_size)
+            else:
+                wv.vectors[i] = self.seeded_vector(wv.index2word[i] + str(self.seed), wv.vector_size)
         if hs:
             self.syn1 = zeros((len(wv.vocab), self.layer1_size), dtype=REAL)
         if negative:
@@ -1710,7 +1723,7 @@ class Word2VecTrainables(utils.SaveLoad):
 
         self.vectors_lockf = ones(len(wv.vocab), dtype=REAL)  # zeros suppress learning
 
-    def update_weights(self, hs, negative, wv):
+    def update_weights(self, hs, negative, wv, fixed_vectors):
         """Copy all the existing weights, and reset the weights for the newly added vocabulary."""
         logger.info("updating layer weights")
         gained_vocab = len(wv.vocab) - len(wv.vectors)
@@ -1718,8 +1731,13 @@ class Word2VecTrainables(utils.SaveLoad):
 
         # randomize the remaining words
         for i in range(len(wv.vectors), len(wv.vocab)):
+            ### INTERCEPT FIXED VECTORS FOR CONTINUING TRAINING
+            current_word = wv.index2word[i]
+            if current_word in fixed_vectors:
+                newvectors[i - len(wv.vectors)] = fixed_vectors[current_word]
             # construct deterministic seed from word AND seed argument
-            newvectors[i - len(wv.vectors)] = self.seeded_vector(wv.index2word[i] + str(self.seed), wv.vector_size)
+            else:
+                newvectors[i - len(wv.vectors)] = self.seeded_vector(wv.index2word[i] + str(self.seed), wv.vector_size)
 
         # Raise an error if an online update is run before initial training on a corpus
         if not len(wv.vectors):
